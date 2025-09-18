@@ -51,7 +51,12 @@ defmodule Gnat.ConnectionSupervisor do
     }
 
     Process.flag(:trap_exit, true)
-    send(self(), :attempt_connection)
+    Map.get(options, :delay)
+    |> case do
+      nil -> send(self(), :attempt_connection)
+      t -> Process.send_after(self(), :attempt_connection, t)
+    end
+    
     {:ok, state}
   end
 
