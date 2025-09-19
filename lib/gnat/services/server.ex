@@ -116,7 +116,7 @@ defmodule Gnat.Services.Server do
 
   def execute(module, message, service) do
     try do
-      endpoint = Map.get(service.subjects, message.topic)
+      endpoint = find_endpoint(message.topic, service.subjects)
       %{group_name: group_name, name: endpoint_name} = endpoint
       telemetry_tags = %{topic: message.topic, endpoint: endpoint_name, group: group_name}
 
@@ -186,4 +186,38 @@ defmodule Gnat.Services.Server do
       type: :gnat_server_error
     )
   end
+
+  # Find endpoint using exact match first, then pattern matching
+  defp find_endpoint(topic, subjects) do
+    Map.get(subjects, topic) || find_wildcard_match(topic, subjects)
+  end
+
+  # Find matching endpoint using NATS wildcard patterns
+  defp find_wildcard_match(topic, subjects) do
+    topic_parts = String.split(topic, ".")
+
+    subjects
+    |> Enum.find_value(fn {pattern, endpoint} ->
+      pattern_parts = String.split(pattern, ".")
+      if match_parts?(topic_parts, pattern_parts), do: endpoint
+    end)
+  end
+
+  # Pattern match topic parts against pattern parts using Elixir pattern matching
+  defp match_parts?([], []), do: true
+  defp match_parts?([], _), do: false
+  defp match_parts?(_, []), do: false
+
+  # Wildcard matches any single token
+  defp match_parts?([_topic_part | topic_rest], ["*" | pattern_rest]) do
+    match_parts?(topic_rest, pattern_rest)
+  end
+
+  # Exact token match
+  defp match_parts?([same | topic_rest], [same | pattern_rest]) do
+    match_parts?(topic_rest, pattern_rest)
+  end
+
+  # No match
+  defp match_parts?(_, _), do: false
 end
