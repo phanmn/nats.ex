@@ -47,7 +47,9 @@ defmodule Gnat.ConnectionSupervisor do
       backoff_period: Map.get(options, :backoff_period, 2000),
       connection_settings: Map.fetch!(options, :connection_settings),
       name: Map.fetch!(options, :name),
-      gnat: nil
+      gnat: nil,
+      on_connect: Map.get(options, :on_connect),
+      on_disconnect: Map.get(options, :on_disconnect),
     }
 
     Process.flag(:trap_exit, true)
@@ -56,7 +58,7 @@ defmodule Gnat.ConnectionSupervisor do
       nil -> send(self(), :attempt_connection)
       t -> Process.send_after(self(), :attempt_connection, t)
     end
-    
+
     {:ok, state}
   end
 
@@ -67,11 +69,13 @@ defmodule Gnat.ConnectionSupervisor do
 
     case Gnat.start_link(connection_config, name: state.name) do
       {:ok, gnat} ->
+        on_connect(state)
         {:noreply, %{state | gnat: gnat}}
 
       {:error, err} ->
         Logger.error("failed to connect #{inspect(err)}")
         Process.send_after(self(), :attempt_connection, state.backoff_period)
+        on_disconnect(state)
         {:noreply, %{state | gnat: nil}}
     end
   end
@@ -84,6 +88,7 @@ defmodule Gnat.ConnectionSupervisor do
   end
 
   def handle_info({:EXIT, _pid, reason}, state) do
+    on_disconnect(state)
     Logger.error("connection failed #{inspect(reason)}")
     send(self(), :attempt_connection)
     {:noreply, state}
@@ -96,5 +101,19 @@ defmodule Gnat.ConnectionSupervisor do
 
   defp random_connection_config(%{connection_settings: connection_settings}) do
     connection_settings |> Enum.random()
+  end
+
+  defp on_connect(%{on_connect: {m, f, a}}) do
+    apply(m, f, a)
+  end
+
+  defp on_connect(_state) do
+  end
+
+  defp on_disconnect(%{on_disconnect: {m, f, a}, gnat: gnat}) when gnat != nil do
+    apply(m, f, a)
+  end
+
+  defp on_disconnect(_state) do
   end
 end
