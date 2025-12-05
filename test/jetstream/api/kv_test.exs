@@ -34,6 +34,16 @@ defmodule Gnat.Jetstream.API.KVTest do
 
       assert :ok = KV.delete_bucket(:gnat, "OTHER_TTL_TEST")
     end
+
+    @tag :message_ttl
+    test "creates a bucket with limit_marker_ttl" do
+      assert {:ok, %{config: config}} =
+               KV.create_bucket(:gnat, "LIMIT_MARKER_TTL_TEST", limit_marker_ttl: 1_000_000_000)
+
+      assert config.subject_delete_marker_ttl == 1_000_000_000
+
+      assert :ok = KV.delete_bucket(:gnat, "LIMIT_MARKER_TTL_TEST")
+    end
   end
 
   test "create_key/4 creates a key" do
@@ -81,6 +91,30 @@ defmodule Gnat.Jetstream.API.KVTest do
 
   test "put_value/4 returns error" do
     assert {:error, :timeout} = KV.put_value(:gnat, "KEY_PUT_TEST", "foo", "baz", timeout: 1)
+  end
+
+  @tag :message_ttl
+  test "detects key removed based on limit_marker_ttl" do
+    assert {:ok, _} =
+             KV.create_bucket(:gnat, "LIMIT_MARKER_TTL_TEST",
+               limit_marker_ttl: 1_000_000_000,
+               ttl: 1_000_000_000
+             )
+
+    test_pid = self()
+
+    {:ok, watcher_pid} =
+      KV.watch(:gnat, "LIMIT_MARKER_TTL_TEST", fn action, key, value ->
+        send(test_pid, {action, key, value})
+      end)
+
+    KV.put_value(:gnat, "LIMIT_MARKER_TTL_TEST", "foo", "bar")
+    assert_receive({:key_added, "foo", "bar"})
+
+    assert_receive({:key_deleted, "foo", ""}, 1500)
+
+    KV.unwatch(watcher_pid)
+    assert :ok = KV.delete_bucket(:gnat, "LIMIT_MARKER_TTL_TEST")
   end
 
   describe "watch/3" do
@@ -158,6 +192,78 @@ defmodule Gnat.Jetstream.API.KVTest do
 
     test "error tuple if problem", %{bucket: bucket} do
       assert {:error, _message} = KV.contents(:gnat, "NOT_REAL_BUCKET")
+      :ok = KV.delete_bucket(:gnat, bucket)
+    end
+  end
+
+  describe "keys/2" do
+    setup do
+      bucket = "KEY_KEYS_TEST"
+      {:ok, _} = KV.create_bucket(:gnat, bucket)
+      %{bucket: bucket}
+    end
+
+    test "provides all keys", %{bucket: bucket} do
+      KV.put_value(:gnat, bucket, "foo", "bar")
+      KV.put_value(:gnat, bucket, "baz", "quz")
+      KV.put_value(:gnat, bucket, "alpha", "beta")
+      assert {:ok, ["alpha", "baz", "foo"]} == KV.keys(:gnat, bucket)
+      :ok = KV.delete_bucket(:gnat, bucket)
+    end
+
+    test "deleted keys not included", %{bucket: bucket} do
+      KV.put_value(:gnat, bucket, "foo", "bar")
+      KV.put_value(:gnat, bucket, "baz", "quz")
+      KV.put_value(:gnat, bucket, "alpha", "beta")
+      KV.delete_key(:gnat, bucket, "baz")
+      assert {:ok, ["alpha", "foo"]} == KV.keys(:gnat, bucket)
+      :ok = KV.delete_bucket(:gnat, bucket)
+    end
+
+    test "purged keys not included", %{bucket: bucket} do
+      KV.put_value(:gnat, bucket, "foo", "bar")
+      KV.put_value(:gnat, bucket, "baz", "quz")
+      KV.purge_key(:gnat, bucket, "foo")
+      assert {:ok, ["baz"]} == KV.keys(:gnat, bucket)
+      :ok = KV.delete_bucket(:gnat, bucket)
+    end
+
+    test "updated keys only appear once", %{bucket: bucket} do
+      :ok = KV.delete_bucket(:gnat, bucket)
+      {:ok, _} = KV.create_bucket(:gnat, bucket, history: 5)
+      KV.put_value(:gnat, bucket, "foo", "bar")
+      KV.put_value(:gnat, bucket, "foo", "baz")
+      KV.put_value(:gnat, bucket, "foo", "qux")
+      assert {:ok, ["foo"]} == KV.keys(:gnat, bucket)
+      :ok = KV.delete_bucket(:gnat, bucket)
+    end
+
+    test "empty list for no keys", %{bucket: bucket} do
+      assert {:ok, []} == KV.keys(:gnat, bucket)
+      :ok = KV.delete_bucket(:gnat, bucket)
+    end
+
+    test "keys are sorted alphabetically", %{bucket: bucket} do
+      KV.put_value(:gnat, bucket, "zebra", "value1")
+      KV.put_value(:gnat, bucket, "apple", "value2")
+      KV.put_value(:gnat, bucket, "middle", "value3")
+      assert {:ok, ["apple", "middle", "zebra"]} == KV.keys(:gnat, bucket)
+      :ok = KV.delete_bucket(:gnat, bucket)
+    end
+
+    test "error tuple if bucket does not exist", %{bucket: bucket} do
+      assert {:error, _message} = KV.keys(:gnat, "NOT_REAL_BUCKET")
+      :ok = KV.delete_bucket(:gnat, bucket)
+    end
+
+    test "handles keys with special characters", %{bucket: bucket} do
+      KV.put_value(:gnat, bucket, "key.with.dots", "value1")
+      KV.put_value(:gnat, bucket, "key-with-dashes", "value2")
+      KV.put_value(:gnat, bucket, "key_with_underscores", "value3")
+
+      assert {:ok, ["key-with-dashes", "key.with.dots", "key_with_underscores"]} ==
+               KV.keys(:gnat, bucket)
+
       :ok = KV.delete_bucket(:gnat, bucket)
     end
   end

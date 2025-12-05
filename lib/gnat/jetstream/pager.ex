@@ -18,7 +18,8 @@ defmodule Gnat.Jetstream.Pager do
       deliver_policy: :all,
       description: "ephemeral consumer",
       replay_policy: :instant,
-      inactive_threshold: 30_000_000_000
+      inactive_threshold: 30_000_000_000,
+      headers_only: Keyword.get(opts, :headers_only)
     }
 
     consumer = apply_opts_to_consumer(consumer, opts)
@@ -107,7 +108,7 @@ defmodule Gnat.Jetstream.Pager do
   end
 
   ## Helpers for accepting user options
-  defp apply_opts_to_consumer(consumer, opts) do
+  defp apply_opts_to_consumer(consumer = %Consumer{}, opts) do
     case Keyword.get(opts, :from_seq) do
       nil ->
         consumer

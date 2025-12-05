@@ -13,6 +13,7 @@ defmodule Gnat.Jetstream.API.KV do
   @type bucket_options ::
           {:history, non_neg_integer()}
           | {:ttl, non_neg_integer()}
+          | {:limit_marker_ttl, non_neg_integer()}
           | {:max_bucket_size, non_neg_integer()}
           | {:max_value_size, non_neg_integer()}
           | {:description, binary()}
@@ -25,6 +26,7 @@ defmodule Gnat.Jetstream.API.KV do
 
   * `:history` - How many historic values to keep per key (defaults to 1, max of 64)
   * `:ttl` - How long to keep values for (in nanoseconds)
+  * `:limit_marker_ttl` - How long the bucket keeps markers when keys are removed by the TTL setting.
   * `:max_bucket_size` - The max number of bytes the bucket can hold
   * `:max_value_size` - The max number of bytes a value may be
   * `:description` - A description for the bucket
@@ -59,7 +61,8 @@ defmodule Gnat.Jetstream.API.KV do
       num_replicas: Keyword.get(params, :replicas, 1),
       storage: Keyword.get(params, :storage, :file),
       placement: Keyword.get(params, :placement),
-      duplicate_window: adjust_duplicate_window(Keyword.get(params, :ttl, 0))
+      duplicate_window: adjust_duplicate_window(Keyword.get(params, :ttl, 0)),
+      subject_delete_marker_ttl: Keyword.get(params, :limit_marker_ttl, 0)
     }
 
     Stream.create(conn, stream)
@@ -217,17 +220,27 @@ defmodule Gnat.Jetstream.API.KV do
   @doc """
   Get all the non-deleted key-value pairs for a Bucket
 
+  ## Options
+
+  * `:batch` - Number of messages to fetch per request (default: 250)
+  * `:domain` - JetStream domain (default: nil)
+
   ## Examples
 
       iex> {:ok, %{"key1" => "value1"}} = Jetstream.API.KV.contents(:gnat, "my_bucket")
+      iex> {:ok, contents} = Jetstream.API.KV.contents(:gnat, "my_bucket", batch: 500)
   """
-  @spec contents(conn :: Gnat.t(), bucket_name :: binary(), domain :: nil | binary()) ::
+  @spec contents(conn :: Gnat.t(), bucket_name :: binary(), opts :: keyword()) ::
           {:ok, map()} | {:error, binary()}
-  def contents(conn, bucket_name, domain \\ nil) do
+  def contents(conn, bucket_name, opts \\ []) do
     alias Gnat.Jetstream.Pager
     stream = stream_name(bucket_name)
+    domain = Keyword.get(opts, :domain)
+    batch_size = Keyword.get(opts, :batch, 250)
 
-    Pager.reduce(conn, stream, [domain: domain], %{}, fn msg, acc ->
+    pager_opts = [domain: domain, batch: batch_size]
+
+    Pager.reduce(conn, stream, pager_opts, %{}, fn msg, acc ->
       case msg do
         %{topic: key, body: body, headers: headers} ->
           if {"kv-operation", "DEL"} in headers do
@@ -240,6 +253,55 @@ defmodule Gnat.Jetstream.API.KV do
           Map.put(acc, subject_to_key(key, bucket_name), body)
       end
     end)
+  end
+
+  @doc """
+  Get all the non-deleted keys for a Bucket
+
+  ## Options
+
+  * `:batch` - Number of messages to fetch per request (default: 250)
+  * `:domain` - JetStream domain (default: nil)
+
+  ## Examples
+
+      iex> {:ok, ["key1", "key2"]} = Jetstream.API.KV.keys(:gnat, "my_bucket")
+      iex> {:ok, keys} = Jetstream.API.KV.keys(:gnat, "my_bucket", batch: 500)
+  """
+  @spec keys(conn :: Gnat.t(), bucket_name :: binary(), opts :: keyword()) ::
+          {:ok, list(binary())} | {:error, binary()}
+  def keys(conn, bucket_name, opts \\ []) do
+    alias Gnat.Jetstream.Pager
+    stream = stream_name(bucket_name)
+    domain = Keyword.get(opts, :domain)
+    batch_size = Keyword.get(opts, :batch, 250)
+
+    pager_opts = [domain: domain, headers_only: true, batch: batch_size]
+
+    result =
+      Pager.reduce(conn, stream, pager_opts, MapSet.new(), fn msg, acc ->
+        case msg do
+          %{topic: key, headers: headers} ->
+            cond do
+              {"kv-operation", "DEL"} in headers ->
+                MapSet.delete(acc, subject_to_key(key, bucket_name))
+
+              {"kv-operation", "PURGE"} in headers ->
+                MapSet.delete(acc, subject_to_key(key, bucket_name))
+
+              true ->
+                MapSet.put(acc, subject_to_key(key, bucket_name))
+            end
+
+          %{topic: key} ->
+            MapSet.put(acc, subject_to_key(key, bucket_name))
+        end
+      end)
+
+    case result do
+      {:ok, key_set} -> {:ok, Enum.sort(MapSet.to_list(key_set))}
+      error -> error
+    end
   end
 
   @doc """
