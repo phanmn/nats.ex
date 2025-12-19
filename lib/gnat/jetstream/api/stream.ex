@@ -82,7 +82,6 @@ defmodule Gnat.Jetstream.API.Stream do
     :sources,
     :subjects,
     :template_owner,
-    :allow_msg_ttl,
     allow_direct: false,
     allow_msg_ttl: false,
     allow_rollup_hdrs: false,
